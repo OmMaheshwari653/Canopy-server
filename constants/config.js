@@ -8,6 +8,6 @@ const corsOptions = {
   credentials: true,
 };
 
-const CANOPY_TOKEN = "Canopy-token";
+const CANOPY_TOKEN = "canopy-token";
 
 export { corsOptions, CANOPY_TOKEN };

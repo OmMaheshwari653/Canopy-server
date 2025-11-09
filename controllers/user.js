@@ -66,7 +66,7 @@ const getMyProfile = TryCatch(async (req, res) => {
 const logout = TryCatch(async (req, res, next) => {
   return res
     .status(200)
-    .cookie("Canopy-token", "", { ...cookieOptions, maxAge: 0 })
+    .cookie("canopy-token", "", { ...cookieOptions, maxAge: 0 })
     .json({
       success: true,
       message: "Logged out successfully",
