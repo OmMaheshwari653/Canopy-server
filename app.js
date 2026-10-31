@@ -26,6 +26,7 @@ import adminRoute from "./routes/admin.js";
 import chatRoute from "./routes/chat.js";
 import userRoute from "./routes/user.js";
 import cors from "cors";
+import mongoose from "mongoose";
 
 dotenv.config({
   path: "./.env",
@@ -33,7 +34,7 @@ dotenv.config({
 
 const mongoURI = process.env.MONGO_URI;
 const port = process.env.PORT || 3000;
-const envMode = process.env.NODE_ENV.trim() || "PRODUCTION";
+const envMode = (process.env.NODE_ENV || "PRODUCTION").trim();
 const adminSecretKey = process.env.ADMIN_SECRET_KEY || "adsasdsdfsdfsdfd";
 const userSocketIDs = new Map();
 const onlineUsers = new Set();
@@ -65,6 +66,22 @@ app.use("/api/v1/admin", adminRoute);
 
 app.get("/", (req, res) => {
   res.send("Hello World");
+});
+
+// --- Kubernetes probes ---
+// liveness: "is the process alive?" The DB check is deliberately left out -
+// if Mongo is briefly down, restarting the pod fixes nothing and only
+// produces a restart loop.
+app.get("/healthz", (req, res) => res.status(200).json({ status: "ok" }));
+
+// readiness: "is it ready to take traffic?" This one DOES check the DB - if
+// Mongo is not connected the pod is removed from the Service endpoints (not
+// restarted), and it rejoins on its own once the connection is back.
+app.get("/readyz", (req, res) => {
+  const connected = mongoose.connection.readyState === 1;
+  res
+    .status(connected ? 200 : 503)
+    .json({ status: connected ? "ready" : "not-ready", db: connected });
 });
 
 io.use((socket, next) => {

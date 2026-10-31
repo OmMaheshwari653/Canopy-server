@@ -1,0 +1,23 @@
+# What to keep OUT of the build context.
+# This is not only about speed - it is a security control:
+# .env holds the Mongo URI, JWT secret and Cloudinary keys. If it lands in the
+# image, anyone who pulls that image has all of them.
+# On Kubernetes these values come from a Secret, not from a file.
+.env
+.env.*
+*.pem
+*.key
+
+node_modules
+npm-debug.log*
+
+.git
+.gitignore
+.github
+
+Dockerfile
+.dockerignore
+README.md
+k8s/
+
+.DS_Store

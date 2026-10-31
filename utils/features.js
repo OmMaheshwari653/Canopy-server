@@ -4,11 +4,18 @@ import { v4 as uuid } from "uuid";
 import { v2 as cloudinary } from "cloudinary";
 import { getBase64, getSockets } from "../lib/helper.js";
 
+// Without HTTPS a browser silently DROPS a 'secure: true' cookie, and
+// 'sameSite: none' is not even valid without 'secure'. On minikube the app is
+// served over http://canopy.local, so this is driven by the environment.
+// The default stays true so real deployments keep their current behaviour -
+// being insecure must be OPT-IN, never the default.
+const secureCookies = process.env.COOKIE_SECURE !== "false";
+
 const cookieOptions = {
   maxAge: 15 * 24 * 60 * 60 * 1000, // 15 days
-  sameSite: "none",
+  sameSite: secureCookies ? "none" : "lax",
   httpOnly: true,
-  secure: true,
+  secure: secureCookies,
 };
 
 const connectDB = async (uri) => {

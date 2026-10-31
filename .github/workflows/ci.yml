@@ -1,0 +1,182 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  # Hardcoded in lowercase on purpose: the GitHub owner is "OmMaheshwari653",
+  # but GHCR only accepts lowercase paths. Using ${{ github.repository_owner }}
+  # directly would fail with "invalid reference format".
+  IMAGE_NAME: ommaheshwari653/canopy-server
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1) TEST - does the app actually boot against a real Mongo?
+  # ------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+
+    # Service containers: GitHub runs these alongside the job, which gives CI
+    # a real Mongo instead of mocks.
+    services:
+      mongo:
+        image: mongo:7.0
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\")'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Smoke test - server boots and health endpoints respond
+        env:
+          MONGO_URI: mongodb://localhost:27017/Canopy
+          PORT: "3000"
+          NODE_ENV: PRODUCTION
+          JWT_SECRET: ci-dummy-secret
+          ADMIN_SECRET_KEY: ci-dummy-admin
+          CLOUDINARY_CLOUD_NAME: dummy
+          CLOUDINARY_API_KEY: dummy
+          CLOUDINARY_API_SECRET: dummy
+        run: |
+          node app.js & APP_PID=$!
+
+          # Wait for the server to come up. A bare `sleep 5` is flaky and
+          # fails on a slow CI machine.
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:3000/healthz >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          echo "--- /healthz ---"
+          curl -fsS http://localhost:3000/healthz | tee /dev/stderr | grep -q '"status":"ok"'
+
+          echo "--- /readyz (Mongo must be connected) ---"
+          curl -fsS http://localhost:3000/readyz | tee /dev/stderr | grep -q '"db":true'
+
+          kill $APP_PID
+          echo "Smoke test PASS"
+
+  # ------------------------------------------------------------------
+  # 2) BUILD + PUSH -> GHCR
+  # ------------------------------------------------------------------
+  build-push:
+    needs: test
+    runs-on: ubuntu-latest
+
+    # Least privilege: this job only needs write access to GHCR.
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      # The next job (manifest bump) consumes this tag.
+      image_tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # GITHUB_TOKEN is provided automatically - no PAT needed here.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Tag = main-<short sha>. `latest` is deliberately absent: with a
+          # mutable tag you cannot answer "which commit is running in prod?"
+          # and rollback becomes impossible.
+          tags: |
+            type=sha,prefix=main-,format=short,enable={{is_default_branch}}
+            type=ref,event=pr
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # On a PR, build but do not push - a PR from a fork must never get
+          # write access to the registry.
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Keep layers in the GitHub cache -> much faster subsequent builds
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan the image for vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          severity: CRITICAL,HIGH
+          # exit-code 0 = report but do not fail the build. You do not control
+          # CVEs in the base image; get visibility first, then start gating.
+          exit-code: "0"
+        if: github.event_name != 'pull_request'
+
+  # ------------------------------------------------------------------
+  # 3) GITOPS - write the new tag into the manifests repo
+  # ------------------------------------------------------------------
+  # *** This is the seam between CI and CD ***
+  # This job never touches the cluster. It only makes a commit in Git.
+  # Argo CD notices that commit and deploys it.
+  #
+  # The benefit: GitHub needs no access to your cluster at all. That is why
+  # this works against a local minikube - and the same reason real companies
+  # use this pattern for clusters sitting behind a firewall.
+  bump-manifests:
+    needs: build-push
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the manifests repo
+        uses: actions/checkout@v4
+        with:
+          repository: OmMaheshwari653/Canopy-k8s
+          # Pushing to a different repo requires a PAT - GITHUB_TOKEN is
+          # scoped to THIS repository only.
+          token: ${{ secrets.MANIFESTS_REPO_TOKEN }}
+
+      - name: Install kustomize
+        run: |
+          curl -sfL https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Update the image tag
+        working-directory: overlays/prod
+        run: |
+          kustomize edit set image \
+            canopy-server=ghcr.io/ommaheshwari653/canopy-server:${{ needs.build-push.outputs.image_tag }}
+
+      - name: Commit and push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add overlays/prod/kustomization.yaml
+          # Skip the commit when nothing changed, otherwise the job fails.
+          git diff --staged --quiet && echo "nothing changed" && exit 0
+          git commit -m "chore: server image -> ${{ needs.build-push.outputs.image_tag }}"
+          git push
