@@ -127,7 +127,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Scan the image for vulnerabilities
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
           severity: CRITICAL,HIGH
@@ -162,8 +162,17 @@ jobs:
 
       - name: Install kustomize
         run: |
-          curl -sfL https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh | bash
-          sudo mv kustomize /usr/local/bin/
+          # Pinned release tarball rather than `curl ... | bash`.
+          # Piping a remote script straight into a shell runs whatever that
+          # URL serves at the time, from an unpinned branch, with no checksum -
+          # it is a supply-chain hole in the middle of a release pipeline.
+          VERSION=v5.8.1
+          curl -sfLo kustomize.tar.gz \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${VERSION}/kustomize_${VERSION}_linux_amd64.tar.gz"
+          tar -xzf kustomize.tar.gz
+          sudo install -m 0755 kustomize /usr/local/bin/kustomize
+          rm -f kustomize.tar.gz kustomize
+          kustomize version
 
       - name: Update the image tag
         working-directory: overlays/prod
